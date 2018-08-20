@@ -1,0 +1,17 @@
+cargo-features = ["edition"]
+
+[package]
+name = "toyfio"
+version = "0.0.1"
+authors = ["Lin Yinfeng <lin.yinfeng@outlook.com>"]
+edition = "2018"
+repository = "https://github.com/linyinfeng/toyfio"
+readme = "READMD.md"
+keywords = ["async", "futures"]
+categories = ["network-programming"]
+
+[dependencies]
+futures-preview = "^0.3.0-alpha.3"
+mio = "0.6.15"
+log = "0.4"
+pretty_env_logger = "0.2"
