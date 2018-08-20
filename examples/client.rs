@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::io;
-use fio::AsyncTcpStream;
+use toyfio::AsyncTcpStream;
 use futures::io::{AsyncWriteExt,AsyncReadExt};
 
 async fn http_get(addr: &SocketAddr) -> Result<String, io::Error> {
@@ -22,5 +22,5 @@ async fn get_baidu() {
 
 fn main() -> Result<(), io::Error> {
 	pretty_env_logger::init();
-	fio::run(get_baidu())
+	toyfio::run(get_baidu())
 }
