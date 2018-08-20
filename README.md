@@ -1,6 +1,6 @@
-# fio -  A toy rust I/O library with mio and futures 0.3 preview
+# Toyfio -  A toy Rust I/O library with Mio and Futures 0.3 preview
 
-It's a toy I/O library built with futures-rs 0.3 preview and Mio.
+It's a toy I/O library built with Futures 0.3 preview and Mio.
 
 ## Feature
 
