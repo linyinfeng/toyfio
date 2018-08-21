@@ -6,6 +6,7 @@ use futures::{
     future::{Future, FutureObj},
     task::{Context, Spawn, SpawnObjError, Wake, LocalWaker, local_waker}
 };
+use slab::Slab;
 use log::debug;
 
 // Re-export modules exports
@@ -23,7 +24,8 @@ struct Reactor {
     poll: mio::Poll,
     events: RefCell<mio::Events>,
     // Counter indicates the futures number associated with the reactor
-    counter: RefCell<usize>,
+    waker_storage: RefCell<Slab<LocalWaker>>,
+    future_storage: RefCell<Slab<FutureObj<'static, ()>>>,
 }
 
 /// Handle of `Reactor`.
@@ -44,29 +46,14 @@ impl Deref for Handle {
 struct InnerWaker(usize);
 
 impl InnerWaker {
-    /// Leak `FutureObj` and store its pointer to InnerWaker.
-    unsafe fn new(future: FutureObj<'static, ()>) -> InnerWaker {
-        let boxed = Box::new(future);
-        let pointer = Box::leak(boxed) as *mut _;
-        let in_usize = pointer as usize;
-        debug!("Leak FutureObj at {:?}", pointer);
-        InnerWaker(in_usize)
+    /// Store `FutureObj` to `REACTOR`'s `future_storage`.
+    fn new(future: FutureObj<'static, ()>) -> InnerWaker {
+        InnerWaker(REACTOR.with(|handle| handle.future_storage.borrow_mut().insert(future)))
     }
 
     /// Crate a local_waker from InnerWaker.
     fn local_waker(self) -> LocalWaker {
         unsafe { local_waker(Arc::new(self)) }
-    }
-
-    /// Convert leaked `FutureObj` back to a box.
-    unsafe fn to_boxed_future_obj(self) -> Box<FutureObj<'static, ()>> {
-        Box::from_raw(self.0 as *mut _)
-    }
-
-    /// Get leaked `FutureObj`'s mutable reference.
-    unsafe fn to_future_obj_mut_ref(self) -> &'static mut FutureObj<'static, ()> {
-        let boxed = self.to_boxed_future_obj();
-        Box::leak(boxed) // Leak again
     }
 }
 
@@ -76,21 +63,24 @@ impl Wake for InnerWaker {
         let waker = unsafe { local_waker(arc_self.clone()) };
         let mut handle = Reactor::handle();
         let mut context = Context::new(&waker, &mut handle);
-        let future_obj = unsafe { arc_self.to_future_obj_mut_ref() };
-        let future = PinMut::new(future_obj);
-        match future.poll(&mut context) {
-            Poll::Ready(_) => {
-                debug!("Future done");
-                unsafe { arc_self.to_boxed_future_obj() }; // Gain the box, auto drop it
-                debug!("Drop FutureObj at {:p}", future_obj);
-                REACTOR.with(|handle| {
-                    handle.decrease_counter();
-                });
-            },
-            Poll::Pending => {
-                debug!("Future not yet ready");
+        REACTOR.with(|handle| {
+            let res;
+            {
+                let future_obj = &mut handle.future_storage.borrow_mut()[arc_self.0];
+                let future = PinMut::new(future_obj);
+                res = future.poll(&mut context);
             }
-        }
+            match res {
+                Poll::Ready(_) => {
+                    debug!("Future done");
+                    handle.future_storage.borrow_mut().remove(arc_self.0);
+                },
+                Poll::Pending => {
+                    debug!("Future not yet ready");
+                }
+            }
+        });
+
     }
 }
 
@@ -108,7 +98,8 @@ impl Reactor {
         Ok(Reactor {
             poll: mio::Poll::new()?,
             events: RefCell::new(mio::Events::with_capacity(events_capacity)),
-            counter: RefCell::new(0),
+            waker_storage: RefCell::new(Slab::new()),
+            future_storage: RefCell::new(Slab::new()),
         })
     }
 
@@ -118,13 +109,12 @@ impl Reactor {
         let mut events = self.events.borrow_mut();
         let _ready = self.poll.poll(&mut events, None)?;
         for event in &*events {
-            let mio::Token(waker) = event.token();
-            let waker = waker as *mut LocalWaker;
-            debug!("Wake using waker at {:p}", waker);
-            let boxed = unsafe { Box::from_raw(waker) };
-            boxed.wake();
-            debug!("Drop waker at {:p}", waker);
-            // Waker will drop automatically
+            let mio::Token(key) = event.token();
+            {
+                let waker = &mut self.waker_storage.borrow_mut()[key];
+                waker.wake();
+            }
+            self.waker_storage.borrow_mut().remove(key);
         }
         debug!("Core iteration end");
         Ok(())
@@ -132,7 +122,7 @@ impl Reactor {
 
     /// Spawn the future and do event loop.
     fn start_loop(&self) -> Result<(), io::Error> {
-        while *self.counter.borrow() > 0 {
+        while self.future_storage.borrow().len() > 0 {
             self.iterate()?;
         }
         Ok(())
@@ -151,9 +141,7 @@ impl Reactor {
     /// Manipulate waker and interest.
     fn reregister<E>(&self, handle: &E, waker: LocalWaker, interest: mio::Ready) -> Result<(), io::Error>
         where E: mio::Evented + ?Sized {
-        let waker = Box::leak(Box::new(waker)) as *mut _; // Leak the waker
-        debug!("Leak waker to {:p}", waker);
-        let token = mio::Token(waker as usize);
+        let token = mio::Token(self.waker_storage.borrow_mut().insert(waker));
         self.poll.reregister(handle, token, interest, mio::PollOpt::oneshot())?;
         Ok(())
     }
@@ -167,34 +155,10 @@ impl Reactor {
 //        Ok(())
 //    }
 
-    /// Increase futures counter.
-    /// 
-    /// When a new future spawned, call this function.
-    fn increase_counter(&self) {
-        let mut counter = self.counter.borrow_mut();
-        *counter += 1;
-    }
-
-    /// Decrease futures counter.
-    /// 
-    /// When a future done, call this function.
-    /// 
-    /// If the counter has been zero, the function will panic
-    fn decrease_counter(&self) {
-        let mut counter = self.counter.borrow_mut();
-        if *counter > 0 {
-            *counter -= 1;
-        } else {
-            panic!("Counter of reactor lower than 0");
-        }
-    }
-
     /// The real spawn function.
     fn do_spawn(&self, future: FutureObj<'static, ()>) {
-        let waker = unsafe { InnerWaker::new(future) }.local_waker();
+        let waker = InnerWaker::new(future).local_waker();
         waker.wake(); // Just wake it to do first polling
-        self.increase_counter();
-        // After that
     }
 }
 
