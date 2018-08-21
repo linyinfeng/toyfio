@@ -20,7 +20,7 @@ thread_local! {
 
 /// Reactor for futures.
 #[derive(Debug)]
-struct Reactor {
+pub struct Reactor {
     poll: mio::Poll,
     events: RefCell<mio::Events>,
     // Counter indicates the futures number associated with the reactor
@@ -32,7 +32,7 @@ struct Reactor {
 ///
 /// Can be deref to a `Reactor`.
 #[derive(Debug, Clone)]
-struct Handle(Rc<Reactor>);
+pub struct Handle(Rc<Reactor>);
 
 impl Deref for Handle {
     type Target = Reactor;
@@ -64,21 +64,18 @@ impl Wake for InnerWaker {
         let mut handle = Reactor::handle();
         let mut context = Context::new(&waker, &mut handle);
         REACTOR.with(|handle| {
-            let res;
-            {
+            let res = {
                 let future_obj = &mut handle.future_storage.borrow_mut()[arc_self.0];
                 let future = PinMut::new(future_obj);
-                res = future.poll(&mut context);
-            }
+                future.poll(&mut context)
+            };
             match res {
                 Poll::Ready(_) => {
                     debug!("Future done");
                     handle.future_storage.borrow_mut().remove(arc_self.0);
                 },
-                Poll::Pending => {
-                    debug!("Future not yet ready");
-                }
-            }
+                Poll::Pending => debug!("Future not yet ready"),
+            };
         });
 
     }
@@ -131,7 +128,7 @@ impl Reactor {
     /// Register when the handle first crated.
     /// 
     /// Use this function to eliminate the difference between first and other polls of future.
-    fn register<E>(&self, handle: &E) -> Result<(), io::Error>
+    pub fn register<E>(&self, handle: &E) -> Result<(), io::Error>
     where E: mio::Evented + ?Sized {
         // Use Token(0) to just hold the place
         self.poll.register(handle, mio::Token(0), mio::Ready::empty(), mio::PollOpt::oneshot())?;
@@ -139,21 +136,12 @@ impl Reactor {
     }
 
     /// Manipulate waker and interest.
-    fn reregister<E>(&self, handle: &E, waker: LocalWaker, interest: mio::Ready) -> Result<(), io::Error>
+    pub fn reregister<E>(&self, handle: &E, waker: LocalWaker, interest: mio::Ready) -> Result<(), io::Error>
         where E: mio::Evented + ?Sized {
         let token = mio::Token(self.waker_storage.borrow_mut().insert(waker));
         self.poll.reregister(handle, token, interest, mio::PollOpt::oneshot())?;
         Ok(())
     }
-
-    // Deregister will be automatically performed when handle dropping
-//    fn deregister<E>(&self, handle: &E) -> Result<(), io::Error>
-//    where E: mio::Evented + ?Sized {
-//        debug!("In function deregister");
-//        self.poll.deregister(handle)?;
-//        debug!("Out function deregister");
-//        Ok(())
-//    }
 
     /// The real spawn function.
     fn do_spawn(&self, future: FutureObj<'static, ()>) {
