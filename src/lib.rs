@@ -26,6 +26,7 @@ pub struct Reactor {
     // Counter indicates the futures number associated with the reactor
     waker_storage: RefCell<Slab<LocalWaker>>,
     future_storage: RefCell<Slab<FutureObj<'static, ()>>>,
+    poll_queue: RefCell<Vec<(usize, LocalWaker)>>,
 }
 
 /// Handle of `Reactor`.
@@ -60,24 +61,9 @@ impl InnerWaker {
 impl Wake for InnerWaker {
     /// Wake the future which InnerWaker reference to.
     fn wake(arc_self: &Arc<InnerWaker>) {
-        let waker = unsafe { local_waker(arc_self.clone()) };
-        let mut handle = Reactor::handle();
-        let mut context = Context::new(&waker, &mut handle);
         REACTOR.with(|handle| {
-            let res = {
-                let future_obj = &mut handle.future_storage.borrow_mut()[arc_self.0];
-                let future = PinMut::new(future_obj);
-                future.poll(&mut context)
-            };
-            match res {
-                Poll::Ready(_) => {
-                    debug!("Future done");
-                    handle.future_storage.borrow_mut().remove(arc_self.0);
-                },
-                Poll::Pending => debug!("Future not yet ready"),
-            };
+            (*handle.poll_queue.borrow_mut()).push((arc_self.0,  unsafe { local_waker(arc_self.clone()) }));
         });
-
     }
 }
 
@@ -97,7 +83,24 @@ impl Reactor {
             events: RefCell::new(mio::Events::with_capacity(events_capacity)),
             waker_storage: RefCell::new(Slab::new()),
             future_storage: RefCell::new(Slab::new()),
+            poll_queue: RefCell::new(Vec::new()),
         })
+    }
+
+    fn poll_future(&self, key: usize, waker: LocalWaker) {
+        let mut handle = Reactor::handle();
+        let mut context = Context::new(&waker, &mut handle);
+        let res = {
+            let future = &mut self.future_storage.borrow_mut()[key];
+            PinMut::new(future).poll(&mut context)
+        };
+        match res {
+            Poll::Ready(_) => {
+                debug!("Future done");
+                handle.future_storage.borrow_mut().remove(key);
+            },
+            Poll::Pending => debug!("Future not yet ready"),
+        }
     }
 
     /// Single iteration of event loop.
@@ -108,10 +111,15 @@ impl Reactor {
         for event in &*events {
             let mio::Token(key) = event.token();
             {
-                let waker = &mut self.waker_storage.borrow_mut()[key];
+                let waker = &self.waker_storage.borrow()[key];
                 waker.wake();
             }
             self.waker_storage.borrow_mut().remove(key);
+        }
+
+        let mut poll_queue = self.poll_queue.borrow_mut();
+        while let Some((key, waker)) = poll_queue.pop() {
+            self.poll_future(key, waker);
         }
         debug!("Core iteration end");
         Ok(())
@@ -145,8 +153,9 @@ impl Reactor {
 
     /// The real spawn function.
     fn do_spawn(&self, future: FutureObj<'static, ()>) {
-        let waker = InnerWaker::new(future).local_waker();
-        waker.wake(); // Just wake it to do first polling
+        let inner_waker = InnerWaker::new(future);
+        let waker = inner_waker.local_waker();
+        self.poll_future(inner_waker.0, waker);
     }
 }
 
