@@ -6,16 +6,20 @@ use futures::{
     future::{Future, FutureObj},
     task::{Context, Spawn, SpawnObjError, Wake, LocalWaker, local_waker}
 };
-use slab::Slab;
-use log::debug;
+use log::{debug, trace};
+
+mod leak_storage;
+use crate::leak_storage::LeakStorage;
 
 // Re-export modules exports
 mod async_tcp_stream;
 pub use crate::async_tcp_stream::AsyncTcpStream;
+mod async_tcp_listener;
+pub use crate::async_tcp_listener::AsyncTcpListener;
 
 thread_local! {
     /// The global reactor.
-    static REACTOR: Handle = Reactor::new(1024).expect("Failed to initialize thread local reactor");
+    static REACTOR: Handle = Reactor::new(1024).expect("failed to initialize thread local reactor");
 }
 
 /// Reactor for futures.
@@ -23,10 +27,7 @@ thread_local! {
 pub struct Reactor {
     poll: mio::Poll,
     events: RefCell<mio::Events>,
-    // Counter indicates the futures number associated with the reactor
-    waker_storage: RefCell<Slab<LocalWaker>>,
-    future_storage: RefCell<Slab<FutureObj<'static, ()>>>,
-    poll_queue: RefCell<Vec<(usize, LocalWaker)>>,
+    counter: RefCell<usize>,
 }
 
 /// Handle of `Reactor`.
@@ -49,7 +50,7 @@ struct InnerWaker(usize);
 impl InnerWaker {
     /// Store `FutureObj` to `REACTOR`'s `future_storage`.
     fn new(future: FutureObj<'static, ()>) -> InnerWaker {
-        InnerWaker(REACTOR.with(|handle| handle.future_storage.borrow_mut().insert(future)))
+        InnerWaker(LeakStorage::insert(future))
     }
 
     /// Crate a local_waker from InnerWaker.
@@ -61,9 +62,20 @@ impl InnerWaker {
 impl Wake for InnerWaker {
     /// Wake the future which InnerWaker reference to.
     fn wake(arc_self: &Arc<InnerWaker>) {
-        REACTOR.with(|handle| {
-            (*handle.poll_queue.borrow_mut()).push((arc_self.0,  unsafe { local_waker(arc_self.clone()) }));
-        });
+        let mut handle = Reactor::handle();
+        let waker = unsafe { local_waker(arc_self.clone()) };
+        let mut context = Context::new(&waker, &mut handle);
+        let future = PinMut::new(unsafe { LeakStorage::<FutureObj<'static, ()>>::get_ref_mut(arc_self.0) });
+        match future.poll(&mut context) {
+            Poll::Ready(_) => {
+                debug!("future done");
+                unsafe { LeakStorage::<FutureObj<'static, ()>>::remove(arc_self.0) };
+                REACTOR.with(|handle| {
+                    handle.report_finished();
+                });
+            },
+            Poll::Pending => debug!("future not yet ready"),
+        }
     }
 }
 
@@ -81,53 +93,27 @@ impl Reactor {
         Ok(Reactor {
             poll: mio::Poll::new()?,
             events: RefCell::new(mio::Events::with_capacity(events_capacity)),
-            waker_storage: RefCell::new(Slab::new()),
-            future_storage: RefCell::new(Slab::new()),
-            poll_queue: RefCell::new(Vec::new()),
+            counter: RefCell::new(0),
         })
-    }
-
-    fn poll_future(&self, key: usize, waker: LocalWaker) {
-        let mut handle = Reactor::handle();
-        let mut context = Context::new(&waker, &mut handle);
-        let res = {
-            let future = &mut self.future_storage.borrow_mut()[key];
-            PinMut::new(future).poll(&mut context)
-        };
-        match res {
-            Poll::Ready(_) => {
-                debug!("Future done");
-                handle.future_storage.borrow_mut().remove(key);
-            },
-            Poll::Pending => debug!("Future not yet ready"),
-        }
     }
 
     /// Single iteration of event loop.
     fn iterate(&self) -> Result<(), io::Error> {
-        debug!("Core iteration start");
+        debug!("core iteration start");
         let mut events = self.events.borrow_mut();
         let _ready = self.poll.poll(&mut events, None)?;
         for event in &*events {
             let mio::Token(key) = event.token();
-            {
-                let waker = &self.waker_storage.borrow()[key];
-                waker.wake();
-            }
-            self.waker_storage.borrow_mut().remove(key);
+            let waker = unsafe { LeakStorage::<LocalWaker>::get(key) };
+            waker.wake();
         }
-
-        let mut poll_queue = self.poll_queue.borrow_mut();
-        while let Some((key, waker)) = poll_queue.pop() {
-            self.poll_future(key, waker);
-        }
-        debug!("Core iteration end");
+        debug!("core iteration end");
         Ok(())
     }
 
     /// Spawn the future and do event loop.
     fn start_loop(&self) -> Result<(), io::Error> {
-        while self.future_storage.borrow().len() > 0 {
+        while *self.counter.borrow() > 0 {
             self.iterate()?;
         }
         Ok(())
@@ -139,6 +125,7 @@ impl Reactor {
     pub fn register<E>(&self, handle: &E) -> Result<(), io::Error>
     where E: mio::Evented + ?Sized {
         // Use Token(0) to just hold the place
+        trace!("register called for {:p}", handle);
         self.poll.register(handle, mio::Token(0), mio::Ready::empty(), mio::PollOpt::oneshot())?;
         Ok(())
     }
@@ -146,16 +133,31 @@ impl Reactor {
     /// Manipulate waker and interest.
     pub fn reregister<E>(&self, handle: &E, waker: LocalWaker, interest: mio::Ready) -> Result<(), io::Error>
         where E: mio::Evented + ?Sized {
-        let token = mio::Token(self.waker_storage.borrow_mut().insert(waker));
+        trace!("reregister called for {:p}, interest: {:?}", handle, interest);
+        let token = mio::Token(LeakStorage::insert(waker));
         self.poll.reregister(handle, token, interest, mio::PollOpt::oneshot())?;
         Ok(())
     }
 
+    fn report_new(&self) {
+        *self.counter.borrow_mut() += 1;
+    }
+
+    fn report_finished(&self) {
+        if *self.counter.borrow() == 0 {
+            panic!("reactor counter lower than 0");
+        } else {
+            *self.counter.borrow_mut() -= 1;
+        }
+    }
+
     /// The real spawn function.
     fn do_spawn(&self, future: FutureObj<'static, ()>) {
+        trace!("spawn future: {:?}", future);
+        self.report_new();
         let inner_waker = InnerWaker::new(future);
         let waker = inner_waker.local_waker();
-        self.poll_future(inner_waker.0, waker);
+        waker.wake();
     }
 }
 

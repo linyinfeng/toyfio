@@ -15,7 +15,7 @@ async fn http_get(addr: &SocketAddr) -> Result<String, io::Error> {
 }
 
 async fn get_example() {
-    let addr = "google.com:80".to_socket_addrs().unwrap().next().unwrap();
+    let addr = "rust-lang.org:80".to_socket_addrs().unwrap().next().unwrap();
 	let res = await!(http_get(&addr)).unwrap();
 	println!("{}", res);
 }

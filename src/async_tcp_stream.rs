@@ -24,22 +24,26 @@ impl AsyncTcpStream {
     ///   methods of AsyncTcpStream.
     pub fn connect(addr: &SocketAddr) -> Result<AsyncTcpStream, io::Error> {
         match TcpStream::connect(addr) {
-            Ok(stream) => {
-                REACTOR.with(|handle| handle.register(&stream))?;
-                Ok(AsyncTcpStream(stream))
-            },
+            Ok(stream) => AsyncTcpStream::from_tcp_stream(stream),
             Err(e) => Err(e),
         }
+    }
+
+    /// Convert `TcpStream` to `AsyncTcpStream`, register this `AsyncTcpStream` to `REACTOR`
+    pub fn from_tcp_stream(stream: TcpStream) -> Result<AsyncTcpStream, io::Error> {
+        REACTOR.with(|handle| handle.register(&stream))?;
+        Ok(AsyncTcpStream(stream))
     }
 }
 
 impl AsyncRead for AsyncTcpStream {
     fn poll_read(&mut self, cx: &mut Context, buf: &mut [u8]) -> Poll<Result<usize, io::Error>> {
-        let waker = cx.local_waker().clone();
         match self.0.read(buf) {
             Ok(len) => Poll::Ready(Ok(len)),
             Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
-                match REACTOR.with(|handle| handle.reregister(&self.0, waker, mio::Ready::readable())) {
+                match REACTOR.with(
+                    |handle| handle.reregister(&self.0, cx.local_waker().clone(), mio::Ready::readable())
+                ) {
                     Ok(_) => Poll::Pending,
                     Err(e) => Poll::Ready(Err(e)),
                 }
@@ -51,11 +55,12 @@ impl AsyncRead for AsyncTcpStream {
 
 impl AsyncWrite for AsyncTcpStream {
     fn poll_write(&mut self, cx: &mut Context, buf: &[u8]) -> Poll<Result<usize, io::Error>> {
-        let waker = cx.local_waker().clone();
         match self.0.write(buf) {
             Ok(len) => Poll::Ready(Ok(len)),
             Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
-                match REACTOR.with(|handle| handle.reregister(&self.0, waker, mio::Ready::writable())) {
+                match REACTOR.with(|handle|
+                    handle.reregister(&self.0, cx.local_waker().clone(), mio::Ready::writable())
+                ) {
                     Ok(_) => Poll::Pending,
                     Err(e) => Poll::Ready(Err(e)),
                 }

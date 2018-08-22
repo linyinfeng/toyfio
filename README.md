@@ -6,7 +6,7 @@ It's a toy I/O library built with Futures 0.3 preview and Mio.
 
 This library is directly built on Mio as very thin wrapper of mio.
 
-Now it only support `spawn`, `run` and `AsyncTcpStream`.
+Now it only support `AsyncTcpStream` and `AsyncTcpListener`.
 
 ## Usage
 
@@ -18,5 +18,5 @@ cargo +nightly run --example client
 
 ## Todo
 
-- [x] Consider changing memory leak to using [slab](https://crates.io/crates/slab)
-- A `TcpListener`
+- [x] A `TcpListener`
+- [x] Replace slab with a `LeadStorage`
