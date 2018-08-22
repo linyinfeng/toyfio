@@ -4,9 +4,9 @@ use std::net::SocketAddr;
 use std::io;
 use toyfio::{AsyncTcpListener, AsyncTcpStream};
 use futures::prelude::*;
-use log::{error, debug};
+use log::error;
 
-async fn echo(stream: Result<AsyncTcpStream>) -> Result<(), io::Error> {
+async fn echo(stream: Result<AsyncTcpStream, io::Error>) -> Result<(), io::Error> {
     let mut stream = stream?;
     let mut buf = [0;40960];
 	loop {
@@ -20,7 +20,7 @@ async fn echo(stream: Result<AsyncTcpStream>) -> Result<(), io::Error> {
 
 async fn echo_server(addr: SocketAddr) {
     let listener = AsyncTcpListener::bind(&addr).unwrap();
-    await!(listener.incoming().for_each(async move |stream_res| {
+    await!(listener.incoming().for_each(async move |stream| {
         let done = echo(stream).unwrap_or_else(|err| {
             error!("error occurred when echo: {:?}", err);
         });
