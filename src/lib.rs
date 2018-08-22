@@ -19,14 +19,13 @@ pub use crate::async_tcp_listener::AsyncTcpListener;
 
 thread_local! {
     /// The global reactor.
-    static REACTOR: Handle = Reactor::new(1024).expect("failed to initialize thread local reactor");
+    static REACTOR: Handle = Reactor::new().expect("failed to initialize thread local reactor");
 }
 
 /// Reactor for futures.
 #[derive(Debug)]
 pub struct Reactor {
     poll: mio::Poll,
-    events: RefCell<mio::Events>,
     counter: RefCell<usize>,
 }
 
@@ -84,23 +83,21 @@ impl Reactor {
     fn handle() -> Handle { REACTOR.with(Handle::clone) }
 
     /// Create a new reactor and return the handle, only called by thread local initialization.
-    fn new(events_capacity: usize) -> Result<Handle, io::Error> {
-        Ok(Handle(Rc::new(Self::new_reactor(events_capacity)?)))
+    fn new() -> Result<Handle, io::Error> {
+        Ok(Handle(Rc::new(Self::new_reactor()?)))
     }
 
     /// Create a new reactor, only called by thread local initialization.
-    fn new_reactor(events_capacity: usize) -> Result<Reactor, io::Error> {
+    fn new_reactor() -> Result<Reactor, io::Error> {
         Ok(Reactor {
             poll: mio::Poll::new()?,
-            events: RefCell::new(mio::Events::with_capacity(events_capacity)),
             counter: RefCell::new(0),
         })
     }
 
     /// Single iteration of event loop.
-    fn iterate(&self) -> Result<(), io::Error> {
+    fn iterate(&self, mut events: &mut mio::Events) -> Result<(), io::Error> {
         debug!("core iteration start");
-        let mut events = self.events.borrow_mut();
         let _ready = self.poll.poll(&mut events, None)?;
         for event in &*events {
             let mio::Token(key) = event.token();
@@ -113,8 +110,9 @@ impl Reactor {
 
     /// Spawn the future and do event loop.
     fn start_loop(&self) -> Result<(), io::Error> {
+        let mut events = mio::Events::with_capacity(1024);
         while *self.counter.borrow() > 0 {
-            self.iterate()?;
+            self.iterate(&mut events)?;
         }
         Ok(())
     }
