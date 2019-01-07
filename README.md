@@ -19,4 +19,4 @@ cargo +nightly run --example client
 ## Todo
 
 - [x] A `TcpListener`
-- [x] Replace slab with a `LeadStorage`
+- [x] Replace slab with a `LeakStorage`
