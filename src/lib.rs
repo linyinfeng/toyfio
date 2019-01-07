@@ -1,12 +1,12 @@
-#![feature(futures_api, pin, async_await, await_macro, arbitrary_self_types)]
+#![feature(futures_api, async_await, await_macro, arbitrary_self_types)]
 
-use std::{io, ops::Deref, sync::Arc, rc::Rc, cell::RefCell, mem::PinMut, thread_local};
 use futures::{
-    Poll,
     future::{Future, FutureObj},
-    task::{Context, Spawn, SpawnObjError, Wake, LocalWaker, local_waker}
+    task::{local_waker, LocalWaker, Spawn, SpawnError, Wake},
+    Poll,
 };
 use log::{debug, trace};
+use std::{cell::RefCell, io, ops::Deref, pin::Pin, rc::Rc, sync::Arc, thread_local};
 
 mod leak_storage;
 use crate::leak_storage::LeakStorage;
@@ -37,6 +37,7 @@ pub struct Handle(Rc<Reactor>);
 
 impl Deref for Handle {
     type Target = Reactor;
+
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -60,12 +61,10 @@ impl InnerWaker {
 
 impl Wake for InnerWaker {
     /// Wake the future which InnerWaker reference to.
-    fn wake(arc_self: &Arc<InnerWaker>) {
-        let mut handle = Reactor::handle();
+    fn wake(arc_self: &Arc<Self>) {
         let waker = unsafe { local_waker(arc_self.clone()) };
-        let mut context = Context::new(&waker, &mut handle);
-        let future = PinMut::new(unsafe { LeakStorage::<FutureObj<'static, ()>>::get_ref_mut(arc_self.0) });
-        match future.poll(&mut context) {
+        let future = Pin::new(unsafe { LeakStorage::<FutureObj<'static, ()>>::get_ref_mut(arc_self.0) });
+        match future.poll(&waker) {
             Poll::Ready(_) => {
                 debug!("future done");
                 unsafe { LeakStorage::<FutureObj<'static, ()>>::remove(arc_self.0) };
@@ -80,9 +79,10 @@ impl Wake for InnerWaker {
 
 impl Reactor {
     /// Return thread local reactor handle.
-    fn handle() -> Handle { REACTOR.with(Handle::clone) }
+    //fn handle() -> Handle { REACTOR.with(Handle::clone) }
 
-    /// Create a new reactor and return the handle, only called by thread local initialization.
+    /// Create a new reactor and return the handle, only called by thread local
+    /// initialization.
     fn new() -> Result<Handle, io::Error> {
         Ok(Handle(Rc::new(Self::new_reactor()?)))
     }
@@ -118,19 +118,25 @@ impl Reactor {
     }
 
     /// Register when the handle first crated.
-    /// 
-    /// Use this function to eliminate the difference between first and other polls of future.
+    ///
+    /// Use this function to eliminate the difference between first and other
+    /// polls of future.
     pub fn register<E>(&self, handle: &E) -> Result<(), io::Error>
-    where E: mio::Evented + ?Sized {
+    where
+        E: mio::Evented + ?Sized,
+    {
         // Use Token(0) to just hold the place
         trace!("register called for {:p}", handle);
-        self.poll.register(handle, mio::Token(0), mio::Ready::empty(), mio::PollOpt::oneshot())?;
+        self.poll
+            .register(handle, mio::Token(0), mio::Ready::empty(), mio::PollOpt::oneshot())?;
         Ok(())
     }
 
     /// Manipulate waker and interest.
     pub fn reregister<E>(&self, handle: &E, waker: LocalWaker, interest: mio::Ready) -> Result<(), io::Error>
-        where E: mio::Evented + ?Sized {
+    where
+        E: mio::Evented + ?Sized,
+    {
         trace!("reregister called for {:p}, interest: {:?}", handle, interest);
         let token = mio::Token(LeakStorage::insert(waker));
         self.poll.reregister(handle, token, interest, mio::PollOpt::oneshot())?;
@@ -160,17 +166,17 @@ impl Reactor {
 }
 
 impl Spawn for Reactor {
-    fn spawn_obj(&mut self, future: FutureObj<'static, ()>) -> Result<(), SpawnObjError> {
+    fn spawn_obj(&mut self, future: FutureObj<'static, ()>) -> Result<(), SpawnError> {
         // Never fail
-        REACTOR.with(|handle| { handle.do_spawn(future) });
+        REACTOR.with(|handle| handle.do_spawn(future));
         Ok(())
     }
 }
 
 impl Spawn for Handle {
-    fn spawn_obj(&mut self, future: FutureObj<'static, ()>) -> Result<(), SpawnObjError> {
+    fn spawn_obj(&mut self, future: FutureObj<'static, ()>) -> Result<(), SpawnError> {
         // Never fail
-        REACTOR.with(|handle| { handle.do_spawn(future) });
+        REACTOR.with(|handle| handle.do_spawn(future));
         Ok(())
     }
 }
@@ -178,11 +184,11 @@ impl Spawn for Handle {
 /// Spawn a new future to the default reactor
 pub fn spawn<F: Future<Output = ()> + Send + 'static>(f: F) {
     let future_obj = FutureObj::new(Box::new(f));
-    REACTOR.with(|handle| { handle.do_spawn(future_obj) });
+    REACTOR.with(|handle| handle.do_spawn(future_obj));
 }
 
 /// Spawn a new future and run the event loop
 pub fn run<F: Future<Output = ()> + Send + 'static>(f: F) -> Result<(), io::Error> {
     spawn(f);
-    REACTOR.with(|handle| { handle.start_loop() })
+    REACTOR.with(|handle| handle.start_loop())
 }

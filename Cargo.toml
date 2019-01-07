@@ -1,5 +1,3 @@
-cargo-features = ["edition"]
-
 [package]
 name = "toyfio"
 version = "0.1.0"
@@ -11,7 +9,7 @@ keywords = ["async", "futures"]
 categories = ["network-programming"]
 
 [dependencies]
-futures-preview = "^0.3.0-alpha.3"
-mio = "^0.6.15"
-log = "^0.4.4"
-pretty_env_logger = "^0.2.4"
+futures-preview = "0.3.0-alpha.11"
+mio = "0.6"
+log = "0.4"
+pretty_env_logger = "0.3"

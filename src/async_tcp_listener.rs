@@ -1,10 +1,11 @@
+use crate::{AsyncTcpStream, REACTOR};
+use futures::stream::Stream;
+use futures::task::LocalWaker;
+use futures::task::Poll;
+use mio::net::TcpListener;
 use std::io;
 use std::net::SocketAddr;
-use std::mem::PinMut;
-use mio::net::TcpListener;
-use futures::task::{Context, Poll};
-use futures::stream::Stream;
-use crate::{REACTOR, AsyncTcpStream};
+use std::pin::Pin;
 
 /// AsyncTcpListener is a wrapper of mio::net::TcpListener
 #[derive(Debug)]
@@ -16,7 +17,8 @@ impl AsyncTcpListener {
         TcpListener::bind(addr).and_then(AsyncTcpListener::from_tcp_listener)
     }
 
-    /// Convert `TcpListener` to `AsyncTcpListener`, register this `AsyncTcpListener` to `REACTOR`
+    /// Convert `TcpListener` to `AsyncTcpListener`, register this
+    /// `AsyncTcpListener` to `REACTOR`
     pub fn from_tcp_listener(listener: TcpListener) -> Result<AsyncTcpListener, io::Error> {
         REACTOR.with(|handle| handle.register(&listener))?;
         Ok(AsyncTcpListener(listener))
@@ -34,13 +36,11 @@ pub struct Incoming(TcpListener);
 impl Stream for Incoming {
     type Item = Result<AsyncTcpStream, io::Error>;
 
-    fn poll_next(self: PinMut<Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+    fn poll_next(self: Pin<&mut Self>, waker: &LocalWaker) -> Poll<Option<Self::Item>> {
         match self.0.accept() {
             Ok((stream, _)) => Poll::Ready(Some(AsyncTcpStream::from_tcp_stream(stream))),
             Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
-                match REACTOR.with(|reactor|
-                    reactor.reregister(&self.0, cx.local_waker().clone(), mio::Ready::readable())
-                ) {
+                match REACTOR.with(|reactor| reactor.reregister(&self.0, waker.clone(), mio::Ready::readable())) {
                     Ok(_) => Poll::Pending,
                     Err(err) => Poll::Ready(Some(Err(err))),
                 }
