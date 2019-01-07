@@ -1,9 +1,9 @@
 #![feature(futures_api)]
 
-use std::io;
-use log::{trace};
 use futures::future;
 use futures::Poll;
+use log::trace;
+use std::io;
 
 fn main() -> Result<(), io::Error> {
     pretty_env_logger::init();
@@ -16,5 +16,5 @@ fn main() -> Result<(), io::Error> {
         toyfio::spawn(another);
         Poll::Ready(())
     });
-	toyfio::run(future)
+    toyfio::run(future)
 }
