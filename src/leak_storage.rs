@@ -13,7 +13,7 @@ impl<T> LeakStorage<T> {
     pub fn insert(item: T) -> usize {
         let boxed = Box::new(item);
         let key = Box::leak(boxed) as *mut _ as usize;
-        debug!("leak item and get key {}", key);
+        debug!("leak item and get key {:p}", key as *const ());
         key
     }
 
@@ -21,7 +21,7 @@ impl<T> LeakStorage<T> {
     ///
     /// Unsafe, key must be valid
     pub unsafe fn remove(key: usize) {
-        debug!("clean item at key {}", key);
+        debug!("clean item at key {:p}", key as *const ());
         Box::from_raw(key as *mut T);
         // box dropped
     }
@@ -30,7 +30,7 @@ impl<T> LeakStorage<T> {
     ///
     /// Unsafe, key must be valid
     pub unsafe fn get(key: usize) -> T {
-        debug!("move item at key {}", key);
+        debug!("move item at key {:p}", key as *const ());
         *Box::from_raw(key as *mut T)
     }
 
@@ -39,7 +39,7 @@ impl<T> LeakStorage<T> {
     /// Unsafe, key must be valid
     #[allow(dead_code)] // Maybe unused in this project
     pub unsafe fn get_ref<'a>(key: usize) -> &'static T {
-        debug!("access item at key {}", key);
+        debug!("access item at key {:p}", key as *const ());
         &*(key as *const T)
     }
 
@@ -47,7 +47,7 @@ impl<T> LeakStorage<T> {
     ///
     /// Unsafe, key must be valid
     pub unsafe fn get_ref_mut<'a>(key: usize) -> &'static mut T {
-        debug!("access item at key {}", key);
+        debug!("access item at key {:p}", key as *const ());
         &mut *(key as *mut T)
     }
 }
