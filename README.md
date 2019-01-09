@@ -1,5 +1,7 @@
 # Toyfio - A toy Rust I/O library with Mio and Futures 0.3 preview
 
+[![Build Status](https://travis-ci.com/linyinfeng/toyfio.svg?branch=master)](https://travis-ci.com/linyinfeng/toyfio)
+
 It's a toy I/O library built with Futures 0.3 preview and Mio.
 
 ## Aim
